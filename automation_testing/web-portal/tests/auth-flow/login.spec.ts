@@ -4,6 +4,7 @@ import { urls } from '../../data/urls';
 import { users } from '../../data/users';
 import { getTempUser } from '../../data/temp_user_util';
 
+
 test.describe('Authentication Flow - Login', () => {
   test('Verify that a registered user can successfully log in', async ({ page }) => {
     const loginPage = new LoginPage(page);
@@ -11,7 +12,7 @@ test.describe('Authentication Flow - Login', () => {
     await loginPage.navigateTo(urls.main);
     await loginPage.clickLoginHeader();
 
-    const tempUser = getTempUser();
+    const tempUser = await getTempUser();
     const userToLogin = tempUser || users.contentCreator;
 
     console.log(`Logging in with user: ${userToLogin.email}`);

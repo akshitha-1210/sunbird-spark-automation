@@ -1,9 +1,10 @@
 import { test, expect, Page } from '@playwright/test';
 import { urls } from '../../data/urls';
-import { consumeContent } from '../helpers/contentHelper';
+import { collectCards, consumeContent } from '../helpers/contentHelper';
 
 test.describe.configure({ mode: 'serial' });
-test.setTimeout(600000);
+test.use({ launchOptions: { slowMo: 500 } });
+test.setTimeout(300000);
 
 async function scrollToLoadAll(page: Page) {
   for (let i = 0; i < 6; i++) {
@@ -15,7 +16,7 @@ async function scrollToLoadAll(page: Page) {
 
 // Returns the hrefs of all content cards currently in the DOM
 async function getVisibleCardHrefs(page: Page): Promise<string[]> {
-  return page.locator('a[href*="/content/do_"], a[href*="/collection/do_"]').evaluateAll((els) =>
+  return page.locator('a[href*="/content/do_"]').evaluateAll((els) =>
     els.map((el) => (el as HTMLAnchorElement).href)
   );
 }
@@ -34,24 +35,23 @@ async function findFilterItems(page: Page) {
   // components — their underlying <input> is hidden but the component itself
   // is interactive. We check visibility per-item in the loop instead.
   const candidates = [
-    { sel: 'mat-checkbox',                       label: 'mat-checkbox' },
-    { sel: 'sb-checkbox',                        label: 'sb-checkbox' },
-    { sel: 'label:has(input[type="checkbox"])',  label: 'label>checkbox' },
-    { sel: 'input[type="checkbox"]',             label: 'input[checkbox]' },
-    { sel: '[role="checkbox"]',                  label: '[role=checkbox]' },
-    { sel: '[class*="filter"] [class*="item"]',  label: 'filter-item' },
-    { sel: '[class*="filter"] [class*="option"]',label: 'filter-option' },
-    { sel: '[class*="facet"] label',             label: 'facet-label' },
-    { sel: '[class*="filter"] label',            label: 'filter-label' },
+    'mat-checkbox',
+    'sb-checkbox',
+    'label:has(input[type="checkbox"])',
+    'input[type="checkbox"]',
+    '[role="checkbox"]',
+    '[class*="filter"] [class*="item"]',
+    '[class*="filter"] [class*="option"]',
+    '[class*="facet"] label',
+    '[class*="filter"] label',
   ];
 
-  for (const { sel, label } of candidates) {
+  for (const sel of candidates) {
     const loc = page.locator(sel);
     const count = await loc.count().catch(() => 0);
     if (count > 0) {
       return loc;
     }
-    void label; // consumed only for selector-loop bookkeeping
   }
 
   // Diagnostic: dump all tags + classes near text "Filters" to help identify the right selector
@@ -66,7 +66,7 @@ async function findFilterItems(page: Page) {
       .slice(0, 10)
       .map(el => `<${el.tagName.toLowerCase()} class="${el.className}" role="${el.getAttribute('role')}">`);
   });
-  void dump;
+  console.log('DOM dump:', dump);
 
   return null;
 }
@@ -75,11 +75,7 @@ test.describe('Anonymous User - Explore Page Filters', () => {
   test('Verify content changes when filters are applied', async ({ page }) => {
     await page.goto(urls.explore);
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-    // Wait for at least one card to appear — API-driven and slower under server load
-    await page.locator('a[href*="/content/do_"], a[href*="/collection/do_"]')
-      .first()
-      .waitFor({ state: 'visible', timeout: 15000 })
-      .catch(() => {});
+    await page.waitForTimeout(3000);
 
     // Capture baseline
     const baselineHrefs = await getVisibleCardHrefs(page);
@@ -187,172 +183,59 @@ test.describe('Anonymous User - Course Access Gate', () => {
 
     const box = await loginBtn.boundingBox();
     const viewportWidth = page.viewportSize()?.width ?? 1280;
-    expect(box, 'Login button bounding box must be measurable').not.toBeNull();
+    if (!box) throw new Error('Login button bounding box is null');
     expect(
-      box!.x + box!.width / 2,
+      box.x + box.width / 2,
       'Login button should be positioned on the right side of the page'
     ).toBeGreaterThan(viewportWidth / 2);
   });
 });
 
 // ── Flow 3: Consume every distinct content type on the Explore page ─────────
-// Strategy: for each filter, click the checkbox → click the first card →
-// consume the content → navigate back. Course is skipped (requires login).
 
 test.describe('Anonymous User - Explore Page Content Consumption', () => {
   test('Consume all available content types on the Explore page', async ({ page }) => {
+    await page.goto(urls.explore);
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+    await scrollToLoadAll(page);
 
-    // Expand a sidebar accordion section if it is currently collapsed.
-    async function expandSection(name: string) {
-      const btn = page.locator(`button:has-text("${name}")`).first();
-      if (!(await btn.isVisible({ timeout: 3000 }).catch(() => false))) return;
-      const state = await btn.evaluate((el) => el.getAttribute('data-state')).catch(() => '');
-      if (state !== 'open') {
-        await btn.click();
-        await page.waitForTimeout(500);
-      }
-    }
+    const cardsToConsume = await collectCards(page);
+    await test.info().attach('Cards to consume on Explore', {
+      body: JSON.stringify(cardsToConsume, null, 2),
+      contentType: 'application/json',
+    });
+    expect(cardsToConsume.length).toBeGreaterThan(0);
 
-    // Content type filters — each maps the sidebar label to the type string
-    // passed to consumeContent. Course is excluded (requires login).
-    const contentTypeFilters: { label: string; type: string }[] = [
-      { label: 'Video',       type: 'video'   },
-      { label: 'PDF',         type: 'pdf'     },
-      { label: 'EPUB',        type: 'epub'    },
-      { label: 'YouTube',     type: 'youtube' },
-      { label: 'HTML',        type: 'html'    },
-      { label: 'Interactive', type: 'ecml'    },
-    ];
-
-    // Collection filters — Course excluded (requires login)
-    const collectionFilters: { label: string; type: string }[] = [
-      { label: 'Content Playlist', type: 'content playlist' },
-      { label: 'Digital Textbook', type: 'digital textbook' },
-    ];
-
-    // ── Content Types ─────────────────────────────────────────────────────────
-    for (const { label, type } of contentTypeFilters) {
-      await test.step(`Consume ${label}`, async () => {
+    for (const { type, href } of cardsToConsume) {
+      await test.step(`Consume ${type}`, async () => {
         await page.goto(urls.explore);
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-        await page.waitForTimeout(2000);
+        await scrollToLoadAll(page);
 
-        await expandSection('Content Types');
+        const cardId = href.split('/').pop();
+        if (!cardId) { console.warn(`Skipping card with unparseable href: ${href}`); return; }
+        const card = page.locator(`a[href*="${cardId}"]`).first();
 
-        const filterLabel = page.locator(`label:has-text("${label}")`).first();
-        await filterLabel.scrollIntoViewIfNeeded().catch(() => {});
-        if (!(await filterLabel.isVisible({ timeout: 3000 }).catch(() => false))) {
-          console.log(`  Filter "${label}" not visible — skipping`);
+        for (let i = 0; i < 8; i++) {
+          if (await card.isVisible({ timeout: 1000 }).catch(() => false)) break;
+          await page.evaluate(() => window.scrollBy(0, 400));
+          await page.waitForTimeout(200);
+        }
+
+        if (!(await card.isVisible({ timeout: 3000 }).catch(() => false))) {
+          console.warn(`  Card not found for ${type}, skipping`);
           return;
         }
 
-        await filterLabel.click();
-        await page.waitForTimeout(2000);
-
-        const card = page.locator('a[href*="/content/"]').first();
-        if (!(await card.isVisible({ timeout: 5000 }).catch(() => false))) {
-          console.log(`  No ${label} content found — skipping`);
-          return;
-        }
-
-        console.log(`  Clicking ${label} card`);
-        await card.scrollIntoViewIfNeeded().catch(() => {});
+        await card.scrollIntoViewIfNeeded();
         await card.click();
         await page.waitForURL(
-          (url) => url.pathname.includes('/content/'),
-          { timeout: 15000 },
+          (url) => url.pathname.includes('/content/') || url.pathname.includes('/collection/'),
+          { timeout: 15000 }
         );
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
 
         await consumeContent(page, type);
-
-        // Ensure we returned from the content page. Some players (YouTube/ECML)
-        // may not auto-navigate back in all environments; force a safe return to
-        // the Explore page so the next filter step can run.
-        await page.waitForTimeout(500);
-        if (page.url().includes('/content/')) {
-          console.log('  Still on content page after consumeContent — attempting to navigate back');
-          try {
-            const goBack = page.getByRole('link', { name: /go back/i }).first();
-            if (await goBack.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await goBack.click();
-            } else {
-              const exitBtn = page.getByRole('button', { name: /^exit$/i }).first();
-              if (await exitBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await exitBtn.click();
-              } else {
-                await page.goBack();
-              }
-            }
-            await page.waitForURL((u) => !u.pathname.includes('/content/'), { timeout: 5000 }).catch(() => {});
-          } catch (err) {
-            console.log('  Navigation back failed — forcing Explore page load', err);
-            await page.goto(urls.explore);
-            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-          }
-        }
-      });
-    }
-
-    // ── Collections (Course excluded) ─────────────────────────────────────────
-    for (const { label, type } of collectionFilters) {
-      await test.step(`Consume ${label}`, async () => {
-        await page.goto(urls.explore);
-        await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-        await page.waitForTimeout(2000);
-
-        await expandSection('Collections');
-
-        const filterLabel = page.locator(`label:has-text("${label}")`).first();
-        await filterLabel.scrollIntoViewIfNeeded().catch(() => {});
-        if (!(await filterLabel.isVisible({ timeout: 3000 }).catch(() => false))) {
-          console.log(`  Filter "${label}" not visible — skipping`);
-          return;
-        }
-
-        await filterLabel.click();
-        await page.waitForTimeout(2000);
-
-        const card = page.locator('a[href*="/collection/"]').first();
-        if (!(await card.isVisible({ timeout: 5000 }).catch(() => false))) {
-          console.log(`  No ${label} collection found — skipping`);
-          return;
-        }
-
-        console.log(`  Clicking ${label} card`);
-        await card.scrollIntoViewIfNeeded().catch(() => {});
-        await card.click();
-        await page.waitForURL(
-          (url) => url.pathname.includes('/collection/'),
-          { timeout: 15000 },
-        );
-        await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-
-        await consumeContent(page, type);
-
-        // Ensure we returned from the collection/lesson page — same safe fallback
-        await page.waitForTimeout(500);
-        if (page.url().includes('/content/')) {
-          console.log('  Still on collection content page after consumeContent — attempting to navigate back');
-          try {
-            const goBack = page.getByRole('link', { name: /go back/i }).first();
-            if (await goBack.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await goBack.click();
-            } else {
-              const exitBtn = page.getByRole('button', { name: /^exit$/i }).first();
-              if (await exitBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await exitBtn.click();
-              } else {
-                await page.goBack();
-              }
-            }
-            await page.waitForURL((u) => !u.pathname.includes('/content/'), { timeout: 5000 }).catch(() => {});
-          } catch (err) {
-            console.log('  Navigation back failed — forcing Explore page load', err);
-            await page.goto(urls.explore);
-            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-          }
-        }
       });
     }
   });

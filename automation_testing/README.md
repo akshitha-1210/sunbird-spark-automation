@@ -145,7 +145,8 @@ This has two pieces:
 Quick start:
 
 ```bash
-cd test-runner-service
+
+cd automation_testing/test-runner-service
 npm install
 npm run dev
 ```

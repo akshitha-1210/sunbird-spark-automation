@@ -950,8 +950,13 @@ export async function consumeContent(page: Page, type: string, opts: { navigateB
         await pdfPlayer.hover();
         await page.waitForTimeout(1000);
       }
-      if (await nextBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-        await nextBtn.click();
+      const nextBtnVisible = await nextBtn.isVisible({ timeout: 1500 }).catch(() => false);
+      if (nextBtnVisible) {
+        const clicked = await nextBtn.click().then(() => true).catch(() => false);
+        if (!clicked) {
+          console.log(`  PDF — next button click failed at page ${p} — end of content`);
+          break;
+        }
         await page.waitForTimeout(600);
       } else {
         console.log(`  PDF — next button not visible at page ${p} — end of content`);
@@ -1016,6 +1021,7 @@ export async function consumeContent(page: Page, type: string, opts: { navigateB
               if (r.width < 5 || r.height < 5) return;
               if (r.right < W * 0.45) return;
               if (r.top < 0 || r.bottom > H) return;
+              if (/close|exit|end\s*game/i.test(el.textContent ?? '')) return;
               const style = window.getComputedStyle(el);
               const tag = el.tagName.toUpperCase();
               if (
@@ -1074,6 +1080,7 @@ export async function consumeContent(page: Page, type: string, opts: { navigateB
                   if (r.width < 5 || r.height < 5) return;
                   if (r.right < W * 0.45) return;
                   if (r.top < 0 || r.bottom > H) return;
+                  if (/close|exit|end\s*game/i.test(el.textContent ?? '')) return;
                   const style = window.getComputedStyle(el);
                   const tag = el.tagName.toUpperCase();
                   if (
@@ -1329,6 +1336,7 @@ export async function consumeContent(page: Page, type: string, opts: { navigateB
                     if (r.width < 5 || r.height < 5) return;
                     if (r.right < W * 0.45) return; // must be in right half
                     if (r.top < 0 || r.bottom > H) return; // must be in viewport
+                    if (/close|exit|end\s*game/i.test(el.textContent ?? '')) return;
                     const style = window.getComputedStyle(el);
                     const tag = el.tagName.toUpperCase();
                     if (
